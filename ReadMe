@@ -1,0 +1,51 @@
+
+This PowerShell script, archive_monitor_with_sound.ps1, is designed to monitor a directory for split archives (like *.001, *.002, etc.), check their stability and completeness, extract them using 7-Zip, and then organize the resulting files. It also includes various audio alerts (beeps) and logging.
+Here is a breakdown of the key components and their functions:
+⚙️ Configuration and Setup
+ * Variables:
+   * $BasePath: Base directory for the operation (e.g., C:\Archive).
+   * $PollInterval: How often (in seconds) the script checks for new files (e.g., 30).
+   * $StableWait: Time (in seconds) to wait to check if a file has finished being written (e.g., 5).
+   * $MaxRetries: Maximum number of times to attempt extraction (e.g., 3).
+   * $SevenZipPath: Path to the 7-Zip executable.
+ * Directory Structure: Defines and ensures the existence of several subdirectories within $BasePath:
+   * Incoming: Where new archive files are expected.
+   * Temp: Used for temporary extraction.
+   * Completed: Where successfully extracted files are moved.
+   * Processed: Where the original archive parts go after successful extraction.
+   * Failed: Where the original archive parts go after a failed extraction.
+ * Logging (Write-Log function): Writes messages to the console (with color-coding for ERROR, WARN, and SUCCESS) and to the $LogFile.
+🔊 Audio Alerts
+The script uses the [console]::Beep() method to provide auditory feedback for different events:
+ * Beep-NewFile: Alerts when a new archive is detected.
+ * Beep-ExtractStart: Alerts when an extraction attempt begins.
+ * Beep-ExtractSuccess: Alerts on successful extraction.
+ * Beep-ExtractFail: Alerts on extraction failure.
+📝 Core Utility Functions
+| Function | Description |
+|---|---|
+| Wait-FileStable | Checks if a file's size has stopped changing after $StableWait seconds, indicating it is completely written. |
+| Get-ArchiveParts | Finds all sequentially numbered split archive parts (e.g., filename.001, filename.002, etc.) in a directory based on the first part's name. |
+| Test-PartsComplete | Verifies that the retrieved parts are a complete, continuous sequence starting from .001. |
+| Move-Parts | Moves the set of archive parts to a specified destination directory (e.g., $Processed or $Failed). |
+| Extract-Archive | Executes 7-Zip to extract the archive to a specified output directory and returns true if the exit code is successful (less than or equal to 1). |
+🔁 The Main Processing Loop (Process-Archives function)
+ * Find Archives: Looks for files matching the pattern *.001 in the $Incoming folder, which are treated as the starting point of an archive.
+ * Stability/Completeness Check:
+   * Checks if the first part (*.001) is stable using Wait-FileStable.
+   * Retrieves all parts using Get-ArchiveParts and verifies their sequence using Test-PartsComplete. If checks fail, it logs a warning and skips to the next file.
+ * Extraction Attempt:
+   * Creates a unique temporary working directory in $Temp.
+   * Attempts to extract the archive up to $MaxRetries times. It only considers the extraction successful if 7-Zip's exit code is good AND if files are found in the temporary work directory.
+ * Success/Failure Handling:
+   * On Success:
+     * Moves the extracted content from the temporary folder to a new subdirectory in $Completed, preserving the internal directory structure.
+     * Cleans up the temporary folder.
+     * Moves the original archive parts to $Processed.
+   * On Failure:
+     * Logs an error.
+     * Cleans up the temporary folder.
+     * Moves the original archive parts to $Failed.
+▶️ Start Monitor
+The script starts with a successful log message and enters an infinite while ($true) loop. This loop continuously calls Process-Archives and then waits for $PollInterval seconds before checking for new archives again. It includes a try/catch block to log any unexpected errors without crashing the monitor.
+Would you like me to elaborate on a specific function, or perhaps help you set up this script on your system?
