@@ -1,0 +1,226 @@
+#Requires -Version 5.1
+
+# ================= CONFIG =================
+$BasePath     = "C:\Archive"
+$StableWait   = 5
+$MaxRetries   = 3
+$SevenZipPath = "C:\Program Files\7-Zip\7z.exe"
+
+# --- CLEANUP SWITCHES ---
+$DeleteProcessedFiles = $false  # $true = Delete original .001 files after success; $false = Move to 'Processed'
+$KeepTempOnFail       = $true   # $true = Keep temp files if extraction fails (for debugging)
+$CleanupEmptyIncoming = $true   # $true = Delete empty folders in 'Incoming' after processing
+# =========================================
+
+$Incoming  = Join-Path $BasePath "Incoming"
+$Temp      = Join-Path $BasePath "Temp"
+$Completed = Join-Path $BasePath "Completed"
+$Processed = Join-Path $BasePath "Processed"
+$Failed    = Join-Path $BasePath "Failed"
+$LogFile   = Join-Path $BasePath "archive.log"
+
+# === FIND 7-ZIP ===
+if (-not (Test-Path $SevenZipPath)) {
+    $cmd = Get-Command "7z.exe" -ErrorAction SilentlyContinue
+    if ($cmd) { $SevenZipPath = $cmd.Source } else { $SevenZipPath = "7z" }
+}
+
+# === ENSURE DIRECTORIES ===
+foreach ($dir in @($Incoming,$Temp,$Completed,$Processed,$Failed)) {
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+}
+
+# === LOGGING ===
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    switch ($Level) {
+        "ERROR"   { Write-Host $line -ForegroundColor Red }
+        "WARN"    { Write-Host $line -ForegroundColor Yellow }
+        "SUCCESS" { Write-Host $line -ForegroundColor Green }
+        default   { Write-Host $line }
+    }
+    try { Add-Content -Path $LogFile -Value $line -ErrorAction Stop } catch {}
+}
+
+# === AUDIO ALERTS ===
+function Beep-NewFile { [console]::Beep(1200,150); Start-Sleep -Milliseconds 100; [console]::Beep(1200,150) }
+function Beep-ExtractStart { [console]::Beep(600,200); Start-Sleep -Milliseconds 50; [console]::Beep(900,200) }
+function Beep-ExtractSuccess { [console]::Beep(1400,400) }
+function Beep-ExtractFail { [console]::Beep(400,500) }
+
+# === UTILITIES ===
+function Wait-FileStable {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    Start-Sleep -Seconds 2
+    $size1 = (Get-Item $Path).Length
+    Start-Sleep -Seconds $StableWait
+    if (-not (Test-Path $Path)) { return $false }
+    $size2 = (Get-Item $Path).Length
+    return ($size1 -eq $size2)
+}
+
+function Get-ArchiveParts {
+    param([string]$FirstPart)
+    $dir  = Split-Path $FirstPart
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($FirstPart)
+    Get-ChildItem -Path $dir -File | Where-Object { $_.Name -match "^$base\.\d{3}$" } | Sort-Object Name
+}
+
+function Test-PartsComplete {
+    param($Parts)
+    if ($Parts.Count -lt 2) { return $false }
+    for ($i = 0; $i -lt $Parts.Count; $i++) {
+        $expected = "{0:D3}" -f ($i + 1)
+        if ($Parts[$i].Name -notmatch "\.$expected$") { return $false }
+    }
+    return $true
+}
+
+function Extract-Archive {
+    param([string]$Archive, [string]$OutDir)
+    $proc = Start-Process -FilePath $SevenZipPath -ArgumentList "x `"$Archive`" -o`"$OutDir`" -y" -Wait -NoNewWindow -PassThru
+    return ($proc.ExitCode -le 1)
+}
+
+function Remove-EmptyDirectories {
+    param([string]$Path)
+    Get-ChildItem -Path $Path -Recurse -Directory | Sort-Object FullName -Descending | ForEach-Object {
+        if ((Get-ChildItem -Path $_.FullName).Count -eq 0) {
+            Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# === HANDLE ARCHIVE PARTS (MOVE OR DELETE) ===
+function Handle-SourceFiles {
+    param($Parts, [string]$TargetDir, [bool]$ShouldDelete)
+
+    foreach ($p in $Parts) {
+        if (Test-Path $p.FullName) {
+            if ($ShouldDelete) {
+                Remove-Item -LiteralPath $p.FullName -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                Move-Item -LiteralPath $p.FullName -Destination (Join-Path $TargetDir $p.Name) -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+# === PROCESS SINGLE ARCHIVE ===
+function Process-ArchiveFile {
+    param($ArchiveFileItem)
+
+    $a = $ArchiveFileItem
+    Write-Log "Detected archive $($a.Name)"
+    Beep-NewFile
+
+    if (-not (Wait-FileStable $a.FullName)) {
+        Write-Log "File $($a.Name) is unstable. Skipping." "WARN"
+        return
+    }
+
+    $parts = Get-ArchiveParts $a.FullName
+    if (-not (Test-PartsComplete $parts)) {
+        Write-Log "Archive $($a.Name) incomplete. Waiting." "WARN"
+        return
+    }
+
+    $workDir = Join-Path $Temp $a.BaseName
+    if (Test-Path $workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+
+    $success = $false
+
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        Write-Log "Extraction attempt $i for $($a.Name)"
+        Beep-ExtractStart
+
+        if (Extract-Archive $a.FullName $workDir) {
+            if ((Get-ChildItem $workDir -Recurse -File).Count -gt 0) {
+                $success = $true
+                break
+            }
+        }
+        Start-Sleep -Seconds 3
+    }
+
+    if ($success) {
+        Write-Log "Extraction successful for $($a.Name)" "SUCCESS"
+        Beep-ExtractSuccess
+        
+        $archiveRoot = Join-Path $Completed $a.BaseName
+        $files = Get-ChildItem -Path $workDir -Recurse -File
+        
+        foreach ($file in $files) {
+            $rel  = $file.FullName.Substring($workDir.Length).TrimStart('\')
+            $dest = Join-Path $archiveRoot $rel
+            $dir  = Split-Path $dest
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            Move-Item -LiteralPath $file.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
+        }
+
+        # Success Cleanup
+        Start-Sleep -Seconds 2
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        
+        # Handle Source Files (Delete or Move based on config)
+        Handle-SourceFiles -Parts $parts -TargetDir $Processed -ShouldDelete $DeleteProcessedFiles
+    }
+    else {
+        Write-Log "Extraction failed for $($a.Name)" "ERROR"
+        Beep-ExtractFail
+        
+        # Failure Cleanup
+        if (-not $KeepTempOnFail) {
+            Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Log "Kept temp folder for debugging: $workDir" "WARN"
+        }
+        
+        Move-Parts $parts $Failed # Always move failed source files to 'Failed' (never delete automatically)
+    }
+
+    if ($CleanupEmptyIncoming) {
+        Remove-EmptyDirectories -Path $Incoming
+    }
+
+    Write-Log "-----------------------------------"
+}
+
+# === START MONITOR ===
+Write-Log "Archive Monitor Started" "SUCCESS"
+Write-Log "Configs: DeleteProcessed=$DeleteProcessedFiles | KeepTempOnFail=$KeepTempOnFail"
+
+$watcher = New-Object System.IO.FileSystemWatcher
+$watcher.Path = $Incoming
+$watcher.Filter = "*.001"
+$watcher.IncludeSubdirectories = $false
+$watcher.EnableRaisingEvents = $true
+
+$action = { 
+    $path = $Event.SourceEventArgs.FullPath
+    Start-Sleep -Milliseconds 500
+    if (Test-Path $path) {
+        Process-ArchiveFile -ArchiveFileItem (Get-Item $path)
+    }
+}
+
+Register-ObjectEvent $watcher "Created" -Action $action | Out-Null
+
+try {
+    while ($true) {
+        Start-Sleep -Seconds 5
+        # Redundant check for missed files
+        Get-ChildItem -Path $Incoming -Filter "*.001" -File | Where-Object { $_.LastWriteTime -lt (Get-Date).AddSeconds(-10) } | ForEach-Object {
+            Process-ArchiveFile -ArchiveFileItem $_
+        }
+    }
+}
+finally {
+    Unregister-Event -SourceIdentifier "FileSystemWatcher.Created" -ErrorAction SilentlyContinue
+    $watcher.Dispose()
+    Write-Log "Monitor Stopped"
+}
